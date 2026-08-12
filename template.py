@@ -736,8 +736,11 @@ class FailureAnalyzer:
             dict mapping failure_type → count.
             Example: {"hallucination": 3, "irrelevant": 2, "incomplete": 5}
         """
-        # TODO
-        raise NotImplementedError("Implement categorize_failures")
+        categories: dict[str, int] = {}
+        for failure in failures:
+            failure_type = failure.failure_type or "unknown"
+            categories[failure_type] = categories.get(failure_type, 0) + 1
+        return categories
 
     def find_root_cause(self, failure: EvalResult) -> str:
         """
@@ -749,8 +752,28 @@ class FailureAnalyzer:
             "Answer is missing key information — increase context window or improve generation"
             "Multiple issues detected — review full pipeline"
         """
-        # TODO: compare faithfulness, relevance, completeness, return appropriate string
-        raise NotImplementedError("Implement find_root_cause")
+        scores = {
+            "faithfulness": failure.faithfulness,
+            "relevance": failure.relevance,
+            "completeness": failure.completeness,
+        }
+        lowest_score = min(scores.values())
+        lowest_metrics = [
+            metric for metric, score in scores.items() if score == lowest_score
+        ]
+
+        if len(lowest_metrics) != 1:
+            return "Multiple issues detected — review full pipeline"
+
+        root_causes = {
+            "faithfulness": "Context is missing or irrelevant — improve retrieval",
+            "relevance": "Answer does not address the question — improve prompt clarity",
+            "completeness": (
+                "Answer is missing key information — increase context window or "
+                "improve generation"
+            ),
+        }
+        return root_causes[lowest_metrics[0]]
 
     def generate_improvement_log(self, failures: list, suggestions: list[str]) -> str:
         """Generate a Markdown table logging failures and improvement actions.
@@ -769,7 +792,28 @@ class FailureAnalyzer:
 
         TODO: Build markdown table with failure details + matched suggestions
         """
-        raise NotImplementedError
+        def escape_cell(value: Any) -> str:
+            return str(value).replace("|", "\\|").replace("\n", " ")
+
+        lines = [
+            "| Failure ID | Type | Root Cause | Suggested Fix | Status |",
+            "|------------|------|------------|---------------|--------|",
+        ]
+        for index, failure in enumerate(failures, start=1):
+            suggestion = (
+                suggestions[index - 1]
+                if index <= len(suggestions)
+                else "Review the root cause and define a corrective action"
+            )
+            lines.append(
+                "| "
+                f"F{index:03d} | "
+                f"{escape_cell(failure.failure_type or 'unknown')} | "
+                f"{escape_cell(self.find_root_cause(failure))} | "
+                f"{escape_cell(suggestion)} | "
+                "Open |"
+            )
+        return "\n".join(lines)
 
     def generate_improvement_suggestions(
         self, failures: list[EvalResult]
@@ -787,8 +831,65 @@ class FailureAnalyzer:
         Returns:
             List of at least 3 suggestion strings (or fewer if failures is empty).
         """
-        # TODO: analyze categorized failures and return suggestions
-        raise NotImplementedError("Implement generate_improvement_suggestions")
+        if not failures:
+            return []
+
+        categories = self.categorize_failures(failures)
+        suggestion_map: dict[str, list[str]] = {
+            "hallucination": [
+                "Improve retrieval grounding so answers use only supported context",
+                "Add a hallucination checker to reject unsupported claims",
+                "Require evidence or citations for factual statements",
+            ],
+            "irrelevant": [
+                "Clarify the answer prompt so it directly addresses the user question",
+                "Add intent detection and query rewriting before generation",
+                "Add answer-relevance checks before returning a response",
+            ],
+            "incomplete": [
+                "Increase context coverage or chunk size to recover missing evidence",
+                "Add few-shot examples that demonstrate complete answers",
+                "Add a completeness check against the requested information",
+            ],
+            "off_topic": [
+                "Improve intent classification to keep answers on topic",
+                "Add explicit topic constraints to the generation prompt",
+                "Reject retrieved chunks that do not match the question intent",
+            ],
+            "refusal": [
+                "Review guardrails to reduce unnecessary refusals",
+                "Add examples that distinguish safe questions from restricted requests",
+                "Route uncertain requests through a more precise safety check",
+            ],
+            "unknown": [
+                "Review uncategorized failures and assign a consistent failure type",
+                "Capture evaluator traces to locate the failing pipeline stage",
+                "Add regression cases for recurring uncategorized failures",
+            ],
+        }
+
+        suggestions: list[str] = []
+        prioritized_categories = sorted(
+            categories.items(), key=lambda item: item[1], reverse=True
+        )
+        for failure_type, _ in prioritized_categories:
+            normalized_type = failure_type.lower()
+            candidates = suggestion_map.get(normalized_type, suggestion_map["unknown"])
+            for suggestion in candidates:
+                if suggestion not in suggestions:
+                    suggestions.append(suggestion)
+
+        fallback_suggestions = [
+            "Add failed cases to the golden dataset and rerun the benchmark",
+            "Inspect low-scoring examples and trace retrieval and generation separately",
+            "Track metric changes after each fix to prevent regressions",
+        ]
+        for suggestion in fallback_suggestions:
+            if len(suggestions) >= 3:
+                break
+            suggestions.append(suggestion)
+
+        return suggestions
 
 
 # ---------------------------------------------------------------------------
